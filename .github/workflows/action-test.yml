@@ -1,0 +1,9 @@
+name: Exu-UI Actions Diagnostic
+on:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "GitHub Actions is running"
