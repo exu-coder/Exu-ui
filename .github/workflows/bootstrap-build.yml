@@ -1,151 +1,99 @@
-name: Exu-UI Secure Bootstrap + Windows Release
+name: Exu-UI Windows Release
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: exu-ui-build
-  cancel-in-progress: false
-
 jobs:
-  build-windows:
+  windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout Exu-UI
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Bootstrap source from archived upstream
+      - name: Import and patch upstream source
+        if: ${{ !hashFiles('src/_boot.js') }}
         shell: pwsh
         run: |
-          if (-not (Test-Path "src/_boot.js")) {
-            git clone --depth 1 https://github.com/GitSquared/edex-ui.git "$env:RUNNER_TEMP/edex-upstream"
-            Get-ChildItem -Force "$env:RUNNER_TEMP/edex-upstream" | Where-Object { $_.Name -notin @('.git') } | Copy-Item -Destination . -Recurse -Force
+          $up = Join-Path $env:RUNNER_TEMP 'edex-upstream'
+          git clone --depth 1 https://github.com/GitSquared/edex-ui.git $up
+          Get-ChildItem -Force $up | Where-Object { $_.Name -ne '.git' } | Copy-Item -Destination . -Recurse -Force
 
-            # Remove the upstream workflows so Exu-UI owns its release pipeline.
-            if (Test-Path ".github/workflows/build-binaries.yaml") { Remove-Item ".github/workflows/build-binaries.yaml" -Force }
-            if (Test-Path ".github/workflows/codeql-analysis.yml") { Remove-Item ".github/workflows/codeql-analysis.yml" -Force }
+          Remove-Item '.github/workflows/build-binaries.yaml' -Force -ErrorAction SilentlyContinue
+          Remove-Item '.github/workflows/codeql-analysis.yml' -Force -ErrorAction SilentlyContinue
 
-            # CVE-2023-30856: reject every non-file WebSocket Origin.
-            $p = "src/classes/terminal.class.js"
-            $s = Get-Content $p -Raw
-            $old = @'
-                verifyClient: info => {
-                    if (this.wss.clients.length >= 1) {
-                        return false;
-                    } else {
-                        return true;
-                    }
-                }
-'@
-            $new = @'
-                verifyClient: info => {
-                    // Security fix for CVE-2023-30856 (CSWSH -> RCE).
-                    // The terminal WebSocket is an internal Electron channel and
-                    // must never accept connections initiated by normal websites.
-                    const origin = info && info.req && info.req.headers
-                        ? info.req.headers.origin
-                        : undefined;
-                    const isElectronFileOrigin = typeof origin === "string" && origin === "file://";
+          $path = 'src/classes/terminal.class.js'
+          $text = Get-Content $path -Raw
+          $old = '                verifyClient: info => {`r`n                    if (this.wss.clients.length >= 1) {`r`n                        return false;`r`n                    } else {`r`n                        return true;`r`n                    }`r`n                }'
+          $new = '                verifyClient: info => {`r`n                    // CVE-2023-30856: prevent cross-site WebSocket hijacking.`r`n                    const origin = info && info.req && info.req.headers ? info.req.headers.origin : undefined;`r`n                    if (origin !== "file://") {`r`n                        console.warn("[Exu-UI] Blocked WebSocket origin:", origin || "<missing>");`r`n                        return false;`r`n                    }`r`n                    if (this.wss.clients.length >= 1) {`r`n                        return false;`r`n                    }`r`n                    return true;`r`n                }'
+          if (-not $text.Contains($old)) { throw 'CVE patch target not found' }
+          Set-Content $path ($text.Replace($old, $new)) -NoNewline
 
-                    if (!isElectronFileOrigin) {
-                        console.warn("[Exu-UI] Blocked WebSocket connection with Origin:", origin || "<missing>");
-                        return false;
-                    }
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $pkg.name = 'exu-ui'
+          $pkg.productName = 'Exu-UI'
+          $pkg.description = 'Exu-UI security-hardened sci-fi terminal emulator'
+          $pkg.repository.url = 'git+https://github.com/exu-coder/Exu-ui.git'
+          $pkg.bugs.url = 'https://github.com/exu-coder/Exu-ui/issues'
+          $pkg.homepage = 'https://github.com/exu-coder/Exu-ui'
+          $pkg.build.appId = 'com.exu.ui'
+          $pkg.build.productName = 'Exu-UI'
+          $pkg.build.publish = $false
+          $pkg.build.artifactName = 'Exu-UI-${os}-${arch}.${ext}'
+          $pkg.build.nsis.artifactName = 'Exu-UI-Windows-${arch}.exe'
+          $pkg | ConvertTo-Json -Depth 20 | Set-Content package.json
 
-                    if (this.wss.clients.length >= 1) {
-                        return false;
-                    }
+          $src = Get-Content src/package.json -Raw | ConvertFrom-Json
+          $src.name = 'exu-ui'
+          $src.productName = 'Exu-UI'
+          $src.description = 'Exu-UI sci-fi terminal interface'
+          $src.repository.url = 'git+https://github.com/exu-coder/Exu-ui.git'
+          $src.bugs.url = 'https://github.com/exu-coder/Exu-ui/issues'
+          $src.homepage = 'https://github.com/exu-coder/Exu-ui'
+          $src | ConvertTo-Json -Depth 20 | Set-Content src/package.json
 
-                    return true;
-                }
-'@
-            if (-not $s.Contains($old)) { throw "Expected vulnerable WebSocket verifyClient block was not found" }
-            $s = $s.Replace($old, $new)
-            Set-Content -Path $p -Value $s -NoNewline
-
-            # Rebrand while retaining GPL-required upstream attribution.
-            $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-            $pkg.name = "exu-ui"
-            $pkg.productName = "Exu-UI"
-            $pkg.description = "Exu-UI: a security-hardened sci-fi terminal emulator."
-            $pkg.repository.url = "git+https://github.com/exu-coder/Exu-ui.git"
-            $pkg.bugs.url = "https://github.com/exu-coder/Exu-ui/issues"
-            $pkg.homepage = "https://github.com/exu-coder/Exu-ui"
-            $pkg.build.appId = "com.exu.ui"
-            $pkg.build.productName = "Exu-UI"
-            $pkg.build.publish = $false
-            $pkg.build.artifactName = "Exu-UI-${os}-${arch}.${ext}"
-            $pkg.build.nsis.artifactName = "Exu-UI-Windows-${arch}.exe"
-            $pkg | ConvertTo-Json -Depth 20 | Set-Content package.json
-
-            $srcPkg = Get-Content src/package.json -Raw | ConvertFrom-Json
-            $srcPkg.name = "exu-ui"
-            $srcPkg.productName = "Exu-UI"
-            $srcPkg.description = "Exu-UI sci-fi terminal interface"
-            $srcPkg.repository.url = "git+https://github.com/exu-coder/Exu-ui.git"
-            $srcPkg.bugs.url = "https://github.com/exu-coder/Exu-ui/issues"
-            $srcPkg.homepage = "https://github.com/exu-coder/Exu-ui"
-            $srcPkg | ConvertTo-Json -Depth 20 | Set-Content src/package.json
-
-            @'
+          @'
 # Exu-UI
 
 Security-hardened continuation of the archived eDEX-UI codebase.
 
-## Security
+## CVE-2023-30856
 
-Exu-UI includes a fix for **CVE-2023-30856**, the cross-site WebSocket hijacking issue that could allow a malicious website to send commands to the terminal. The internal terminal WebSocket now requires the Electron `file://` origin and rejects missing, HTTP, and HTTPS origins.
-
-The original eDEX-UI project is archived and version 2.2.8 is affected by this CVE. Exu-UI is an independent security-focused continuation and is not an official release of the original project.
+Exu-UI rejects terminal WebSocket connections unless the Electron `file://` origin is present. HTTP, HTTPS, missing, and other origins are rejected during the handshake.
 
 ## Credits and license
 
-Exu-UI is maintained and distributed by **Exu / exu-coder**.
+Maintained and distributed by **Exu / exu-coder**. The upstream eDEX-UI code is GPL-3.0 licensed and its original copyright/license notices are retained as required by that license.
 
-The project is based on the GPL-3.0 licensed eDEX-UI codebase by Gabriel 'Squared' Saillard. Original copyright and GPL-3.0 license notices are retained as required by the license.
+## Windows
 
-## Windows installer
-
-GitHub Actions builds a normal Windows NSIS installer. End users can download the `.exe` from the GitHub Releases page and install it without Git, Node.js, npm, or command-line setup.
+Download the `.exe` from GitHub Releases. End users do not need Git, Node.js, npm, or a command prompt.
 '@ | Set-Content README.md
 
-            @'
-# Exu-UI Security Report
+          @'
+# Exu-UI Security Patch
 
-## CVE-2023-30856
+Exu-UI addresses CVE-2023-30856, a cross-site WebSocket hijacking vulnerability in eDEX-UI <= 2.2.8.
 
-Exu-UI fixes the cross-site WebSocket hijacking vulnerability present in eDEX-UI <= 2.2.8.
+The terminal WebSocket handshake now requires an exact Electron `file://` Origin. Connections from normal web pages and connections without an Origin are rejected before they can reach the shell.
 
-### Fix
-
-The terminal WebSocket server validates the HTTP `Origin` header during the WebSocket handshake. Only the Electron application's `file://` origin is accepted. HTTP, HTTPS, missing, and other origins are rejected before a terminal connection is established.
-
-### Additional hardening
-
-- The existing single-client restriction remains enabled.
-- The WebSocket continues to bind through the local terminal architecture used by the application.
-- The rejection is logged for diagnostics.
-
-### Scope
-
-This addresses CVE-2023-30856 specifically. It does not claim that the legacy eDEX-UI dependency tree is free of every possible vulnerability; Exu-UI should continue to receive dependency and security review.
+This is a targeted fix for CVE-2023-30856. The legacy dependency tree should still be treated as unmaintained software and reviewed separately.
 '@ | Set-Content SECURITY-PATCH.md
 
-            git config user.name "Exu"
-            git config user.email "exu-coder@users.noreply.github.com"
-            git add -A
-            git commit -m "Import Exu-UI source with CVE-2023-30856 fix [skip ci]"
-            git push origin HEAD:main
-          }
+          git config user.name 'Exu'
+          git config user.email 'exu-coder@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import Exu-UI source and fix CVE-2023-30856 [skip ci]'
+          git push origin HEAD:main
 
-      - name: Install Node.js 16
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 16.20.2
@@ -158,44 +106,42 @@ This addresses CVE-2023-30856 specifically. It does not claim that the legacy eD
       - name: Install application dependencies
         shell: pwsh
         run: |
-          Push-Location src
+          Set-Location src
           npm install --ignore-scripts --no-audit --no-fund
-          Pop-Location
+          Set-Location ..
 
-      - name: Rebuild node-pty for Electron
+      - name: Rebuild node-pty
         shell: pwsh
         run: .\node_modules\.bin\electron-rebuild.cmd -f -w node-pty -v 12.1.0
 
-      - name: Build Exu-UI Windows installer
+      - name: Build installer
         shell: pwsh
         run: .\node_modules\.bin\electron-builder.cmd --win nsis --x64 --publish never --config.directories.app=src --config.appId=com.exu.ui --config.productName=Exu-UI --config.nsis.artifactName=Exu-UI-Windows-x64.exe
 
-      - name: Verify installer exists
+      - name: Verify installer
         shell: pwsh
         run: |
-          $exe = Get-ChildItem dist -Filter "Exu-UI-Windows-x64.exe" -File | Select-Object -First 1
-          if (-not $exe) { throw "Exu-UI Windows installer was not produced" }
-          Write-Host "Built $($exe.FullName) ($($exe.Length) bytes)"
+          $file = Get-ChildItem dist -Filter 'Exu-UI-Windows-x64.exe' -File | Select-Object -First 1
+          if (-not $file) { throw 'Exu-UI-Windows-x64.exe was not created' }
+          Write-Host "Installer: $($file.FullName)"
 
-      - name: Upload Windows installer artifact
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: Exu-UI-Windows-x64
           path: dist/Exu-UI-Windows-x64.exe
           if-no-files-found: error
 
-      - name: Create GitHub Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v2.2.8-exu.1
           name: Exu-UI v2.2.8-exu.1
           body: |
             Exu-UI security release.
-
-            - Fixes CVE-2023-30856 (cross-site WebSocket hijacking / RCE).
-            - WebSocket connections are restricted to the Electron `file://` origin.
-            - Windows x64 NSIS installer included.
-            - Original GPL-3.0 attribution is retained.
+            - CVE-2023-30856 WebSocket origin validation fix.
+            - Windows x64 NSIS installer.
+            - GPL-3.0 upstream attribution retained.
           files: dist/Exu-UI-Windows-x64.exe
-          draft: false
           prerelease: false
+          draft: false
